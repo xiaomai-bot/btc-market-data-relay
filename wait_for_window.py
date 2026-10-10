@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Wait once for the scheduled collection window; never calls a market API."""
+"""Wait for the scheduled UTC window; never call a market API."""
 
 import sys
 import time
 
 HOUR_MS = 3_600_000
-START_OFFSET_MS = 12 * 60_000 + 15_000
-END_OFFSET_MS = 13 * 60_000 + 30_000
+START_OFFSET_MS = 13 * 60_000
+END_OFFSET_MS = 13 * 60_000 + 5_000
 
 
 class WindowError(Exception):
@@ -32,8 +32,8 @@ def wait_for_window(wall_clock=now_ms, sleeper=time.sleep):
     target, cutoff, delay_ms = window(wall_clock())
     if delay_ms:
         sleeper(delay_ms / 1000)
-    # Recheck the original window after any OS/runner scheduling delay. Do not
-    # wait again, shift to another hour, or proceed after the deadline.
+    # OS delays are checked against the original hour. No second wait, next
+    # hour shift or collection after a missed window is permitted.
     final = wall_clock()
     if type(final) is not int or final < target:
         raise WindowError("scheduled_window_clock_before_target")
