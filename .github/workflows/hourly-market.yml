@@ -2,7 +2,7 @@ name: Collect public MEXC market snapshot
 
 on:
   schedule:
-    - cron: '11 * * * *'
+    - cron: '7 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -17,7 +17,7 @@ jobs:
     # Standard public runners are free. This package must never run privately.
     if: github.event.repository.private == false && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Read public source without storing an authentication token
         shell: bash
