@@ -1,0 +1,85 @@
+name: Collect public OKX market snapshot
+
+on:
+  schedule:
+    - cron: '11 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: public-okx-hourly-market
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    # Standard public runners are free. This package must never run privately.
+    if: github.event.repository.private == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read public source without storing an authentication token
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+
+      - name: Run offline validation tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Atomically record this UTC hour before any market request
+        id: attempt
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        run: python3 claim_hour.py --github-output "$GITHUB_OUTPUT"
+
+      - name: Wait for the scheduled UTC collection window
+        if: github.event_name == 'schedule' && steps.attempt.outputs.claimed == 'true'
+        run: python3 wait_for_window.py
+
+      - name: Collect once from the fixed official OKX endpoint
+        if: steps.attempt.outputs.claimed == 'true'
+        run: python3 collector.py --output snapshots/latest.json --required-attempt-marker snapshots/last_attempt.json
+
+      - name: Commit only the validated public snapshot
+        if: steps.attempt.outputs.claimed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- snapshots/latest.json
+          if git diff --cached --quiet -- snapshots/latest.json; then
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit --only -m 'Update public OKX market snapshot' -- snapshots/latest.json
+
+      - name: Publish with a short-lived token only in process memory
+        if: steps.attempt.outputs.claimed == 'true'
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import base64
+          import os
+          import subprocess
+          import sys
+
+          env = os.environ.copy()
+          token = env.pop("PUBLISH_TOKEN")
+          authorization = base64.b64encode(("x-access-token:" + token).encode()).decode()
+          for key in list(env):
+              if key.startswith("GIT_TRACE") or key.startswith("GIT_CONFIG_") or key == "GIT_CURL_VERBOSE":
+                  env.pop(key)
+          env["GIT_CONFIG_COUNT"] = "1"
+          env["GIT_CONFIG_KEY_0"] = "http.https://github.com/.extraheader"
+          env["GIT_CONFIG_VALUE_0"] = "AUTHORIZATION: basic " + authorization
+          env["GIT_TERMINAL_PROMPT"] = "0"
+          result = subprocess.run(["git", "push", "origin", "HEAD:main"],
+                                  env=env, capture_output=True, timeout=30)
+          if result.returncode:
+              print("git_push_failed")
+              sys.exit(1)
+          print("public_snapshot_published")
