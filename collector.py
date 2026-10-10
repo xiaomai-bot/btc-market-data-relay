@@ -94,6 +94,10 @@ def public_json(url: str):
 def _call(fetch_json, endpoint, label):
     try:
         raw = fetch_json(BASE + endpoint)
+    except ClaimError:
+        # A UTC-hour rollover is a permission failure, not an upstream error.
+        # Stop before transport; preserve its constant safe diagnostic.
+        raise
     except DiagnosticError as e:
         # Only known reasons, never response bodies/headers/exception text.
         safe = re.fullmatch(r"http_[0-9]{3}|network_error|body_too_large|invalid_json|url_not_allowlisted", e.reason)
@@ -265,8 +269,17 @@ def main(argv=None):
         # Both metadata and full diagnostics consume the persistent hour claim.
         # Failure keeps this claim; no same-hour mode switch or market retry.
         require_current_marker(args.required_attempt_marker, now_ms())
-        result = collect(mode=args.mode)
+        def guarded_fetch(url):
+            # Dispatch may start late in the hour. Every HTTP operation must
+            # still belong to the successfully claimed hour, not just the first.
+            require_current_marker(args.required_attempt_marker, now_ms())
+            return public_json(url)
+
+        result = collect(mode=args.mode, fetch_json=guarded_fetch)
         if args.mode == "full":
+            # Validation could finish after the claim hour even when all HTTP
+            # calls began within it. Never publish a result under a stale claim.
+            require_current_marker(args.required_attempt_marker, now_ms())
             write_snapshot(result["snapshot"], args.output)
     except (DiagnosticError, ClaimError) as e:
         print(json.dumps({"status": "failed", "reason": str(e), "readyForProduction": False}))
