@@ -1,4 +1,4 @@
-name: Collect public OKX market snapshot
+name: Collect public MEXC market snapshot
 
 on:
   schedule:
@@ -41,9 +41,9 @@ jobs:
         if: github.event_name == 'schedule' && steps.attempt.outputs.claimed == 'true'
         run: python3 wait_for_window.py
 
-      - name: Collect once from the fixed official OKX endpoint
+      - name: Collect once from the fixed official MEXC endpoint
         if: steps.attempt.outputs.claimed == 'true'
-        run: python3 collector.py --output snapshots/latest.json --required-attempt-marker snapshots/last_attempt.json
+        run: python3 collector.py --mode full --output snapshots/latest.json --required-attempt-marker snapshots/last_attempt.json
 
       - name: Commit only the validated public snapshot
         if: steps.attempt.outputs.claimed == 'true'
@@ -54,7 +54,7 @@ jobs:
           if git diff --cached --quiet -- snapshots/latest.json; then
             exit 0
           fi
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit --only -m 'Update public OKX market snapshot' -- snapshots/latest.json
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit --only -m 'Update public MEXC market snapshot' -- snapshots/latest.json
 
       - name: Publish with a short-lived token only in process memory
         if: steps.attempt.outputs.claimed == 'true'
