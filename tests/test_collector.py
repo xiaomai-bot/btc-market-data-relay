@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import collector as c
+import claim_hour
 
 NOW = 1_791_636_030_000  # A fixed UTC H1 boundary plus 30 seconds.
 
@@ -288,7 +289,7 @@ class CollectorTest(unittest.TestCase):
             with patch.object(c, "require_current_marker", side_effect=lambda *_: events.append("claim")), patch.object(c, "collect", side_effect=lambda **_: events.append("collect") or result), redirect_stdout(stream):
                 status = c.main(["--mode", "full", "--output", str(output), "--required-attempt-marker", "marker.json"])
             self.assertEqual(status, 0)
-            self.assertEqual(events, ["claim", "collect"])
+            self.assertEqual(events, ["claim", "collect", "claim"])
             self.assertEqual(json.loads(output.read_text()), result["snapshot"])
             self.assertEqual(json.loads(stream.getvalue()), result["summary"])
             self.assertNotIn("60000.25", stream.getvalue())
@@ -321,6 +322,66 @@ class CollectorTest(unittest.TestCase):
                     c.write_snapshot(Fake().run()["snapshot"], output)
             self.assertEqual(output.read_text(), "old unchanged\n")
             self.assertEqual(list(Path(directory).glob(".snapshot-*.tmp")), [])
+
+    def test_each_http_is_guarded_against_utc_hour_rollover(self):
+        real_collect = c.collect
+        next_hour = NOW // c.HOUR_MS * c.HOUR_MS + c.HOUR_MS
+        for crossing_request in range(5):
+            with self.subTest(crossing_request=crossing_request), tempfile.TemporaryDirectory() as directory:
+                marker = Path(directory) / "last_attempt.json"
+                marker_text = json.dumps({"utcHour": claim_hour.hour_id(NOW), "attemptedAt": claim_hour.iso_ms(NOW)})
+                marker.write_text(marker_text)
+                output = Path(directory) / "latest.json"
+                output.write_text("old unchanged\n")
+                f = Fake()
+                stream = io.StringIO()
+                clocks = [NOW] * (crossing_request + 1) + [next_hour]
+                def offline_collect(**kwargs):
+                    return real_collect(**kwargs, sleeper=f.sleeps.append, wall_clock=f.wall)
+                with patch.object(c, "now_ms", side_effect=clocks), patch.object(c, "public_json", side_effect=f.fetch), patch.object(c, "collect", side_effect=offline_collect), redirect_stdout(stream):
+                    status = c.main(["--mode", "full", "--output", str(output), "--required-attempt-marker", str(marker)])
+                self.assertEqual(status, 1)
+                self.assertEqual(len(f.calls), crossing_request)
+                self.assertEqual(json.loads(stream.getvalue())["reason"], "attempt_hour_changed_before_market")
+                self.assertEqual(output.read_text(), "old unchanged\n")
+                self.assertEqual(marker.read_text(), marker_text)
+                self.assertEqual(list(Path(directory).glob(".snapshot-*.tmp")), [])
+
+    def test_final_write_guard_rejects_rollover_after_last_http(self):
+        real_collect = c.collect
+        next_hour = NOW // c.HOUR_MS * c.HOUR_MS + c.HOUR_MS
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "last_attempt.json"
+            marker_text = json.dumps({"utcHour": claim_hour.hour_id(NOW), "attemptedAt": claim_hour.iso_ms(NOW)})
+            marker.write_text(marker_text)
+            output = Path(directory) / "latest.json"
+            output.write_text("old unchanged\n")
+            f = Fake()
+            stream = io.StringIO()
+            def offline_collect(**kwargs):
+                return real_collect(**kwargs, sleeper=f.sleeps.append, wall_clock=f.wall)
+            with patch.object(c, "now_ms", side_effect=[NOW] * 6 + [next_hour]), patch.object(c, "public_json", side_effect=f.fetch), patch.object(c, "collect", side_effect=offline_collect), redirect_stdout(stream):
+                status = c.main(["--mode", "full", "--output", str(output), "--required-attempt-marker", str(marker)])
+            self.assertEqual(status, 1)
+            self.assertEqual(len(f.calls), 5)
+            self.assertEqual(json.loads(stream.getvalue())["reason"], "attempt_hour_changed_before_market")
+            self.assertEqual(output.read_text(), "old unchanged\n")
+            self.assertEqual(marker.read_text(), marker_text)
+            self.assertEqual(list(Path(directory).glob(".snapshot-*.tmp")), [])
+
+    def test_metadata_http_guard_is_also_required(self):
+        real_collect = c.collect
+        next_hour = NOW // c.HOUR_MS * c.HOUR_MS + c.HOUR_MS
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "last_attempt.json"
+            marker.write_text(json.dumps({"utcHour": claim_hour.hour_id(NOW), "attemptedAt": claim_hour.iso_ms(NOW)}))
+            f = Fake()
+            def offline_collect(**kwargs):
+                return real_collect(**kwargs, sleeper=f.sleeps.append, wall_clock=f.wall)
+            with patch.object(c, "now_ms", side_effect=[NOW, NOW, next_hour]), patch.object(c, "public_json", side_effect=f.fetch), patch.object(c, "collect", side_effect=offline_collect), redirect_stdout(io.StringIO()):
+                status = c.main(["--mode", "metadata", "--required-attempt-marker", str(marker)])
+            self.assertEqual(status, 1)
+            self.assertEqual(len(f.calls), 1)
 
 
 if __name__ == "__main__":
